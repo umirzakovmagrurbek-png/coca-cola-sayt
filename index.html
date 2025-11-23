@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chalib bo'ladigan pianino </title>
+  <style>
+    :root{
+      --white-key:#ffffff;
+      --black-key:#111;
+      --accent:#6b63ff;
+      --key-border:#ddd;
+      --bg:#0f1724;
+      --card:#0b1220;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family:Inter, system-ui, -apple-system, sans-serif;
+      background:linear-gradient(180deg,var(--bg),#07101a);
+      color:#e6eef8;
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:28px;
+    }
+    .wrap{
+      width:100%;
+      max-width:980px;
+      background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+      border-radius:12px;
+      padding:18px;
+      box-shadow:0 8px 30px rgba(2,6,23,0.6);
+    }
+    header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+    h1{font-size:18px;margin:0}
+    .controls{display:flex;gap:12px;align-items:center}
+    button, .btn{background:transparent;border:1px solid rgba(255,255,255,0.07);color:inherit;padding:8px 10px;border-radius:8px;cursor:pointer}
+    .btn-primary{background:var(--accent);border:0;color:white}
+    .board{position:relative;height:220px;padding:12px;background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005));border-radius:8px;display:flex;align-items:flex-end}
+    .keys{position:relative;width:100%;height:100%;display:flex}
+    .key{flex:1;border:1px solid var(--key-border);border-bottom-left-radius:6px;border-bottom-right-radius:6px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:8px;user-select:none;cursor:pointer;position:relative}
+    .key.white{background:var(--white-key);color:#111;height:100%}
+    .key.black{background:var(--black-key);color:#fff;flex:0 0 48px;margin:0  -24px;z-index:2;height:60%;border-radius:6px;box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+    .key.playing{transform:translateY(3px);box-shadow:0 2px 8px rgba(0,0,0,0.25)}
+    .label{font-size:12px;opacity:0.85}
+    .legend{display:flex;gap:12px;align-items:center}
+    .range{width:140px}
+    footer{margin-top:12px;display:flex;justify-content:space-between;align-items:center}
+    @media (max-width:700px){.board{height:180px}.key.black{flex-basis:36px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Chalib bo'ladigan pianino</h1>
+      <div class="controls">
+        <div class="legend">Vol: <input id="volume" class="range" type="range" min="0" max="1" step="0.01" value="0.6"></div>
+        <button id="oct-down" class="btn">— Oktava</button>
+        <button id="oct-up" class="btn">+ Oktava</button>
+        <button id="sustain" class="btn">Sustain: O‘chiq</button>
+      </div>
+    </header>
+
+    <main>
+      <div class="board" id="board">
+        <div class="keys" id="keys"></div>
+      </div>
+    </main>
+
+    <footer>
+      <div style="font-size:13px">Kompyuter tugmalari: white - <strong>A S D F G H J K L ;</strong>, black - <strong>W E T Y U O P</strong></div>
+      <div style="font-size:13px;opacity:0.9">Touch yoki sichqoncha bilan bosing — tovush chiqadi</div>
+    </footer>
+  </div>
+
+  <script>
+    // --- Simple playable piano using WebAudio ---
+    // Author: ChatGPT (for Magrurbek)
+
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioContext();
+    let masterGain = ctx.createGain();
+    masterGain.connect(ctx.destination);
+    masterGain.gain.value = 0.6;
+
+    const NOTES = [
+      {name:'C',  key:'A'},
+      {name:'C#', key:'W', black:true},
+      {name:'D',  key:'S'},
+      {name:'D#', key:'E', black:true},
+      {name:'E',  key:'D'},
+      {name:'F',  key:'F'},
+      {name:'F#', key:'T', black:true},
+      {name:'G',  key:'G'},
+      {name:'G#', key:'Y', black:true},
+      {name:'A',  key:'H'},
+      {name:'A#', key:'U', black:true},
+      {name:'B',  key:'J'},
+      // second octave white keys to fill visually
+      {name:'C2', key:'K'},
+      {name:'D2', key:'L'},
+      {name:'E2', key:';'}
+    ];
+
+    // map keyboard letter -> note index (case-insensitive)
+    const keyMap = {};
+    NOTES.forEach((n,i)=>{ if(n.key) keyMap[n.key.toLowerCase()]=i });
+
+    const keysContainer = document.getElementById('keys');
+    const sustainBtn = document.getElementById('sustain');
+    const volume = document.getElementById('volume');
+    const octUpBtn = document.getElementById('oct-up');
+    const octDownBtn = document.getElementById('oct-down');
+
+    let activeNodes = new Map();
+    let baseOctave = 4; // C4 as starting C
+    let sustain = false;
+
+    volume.addEventListener('input', e => { masterGain.gain.value = parseFloat(e.target.value); });
+
+    sustainBtn.addEventListener('click', ()=>{
+      sustain = !sustain;
+      sustainBtn.textContent = 'Sustain: ' + (sustain? 'Yoq':'O\'chiq');
+      sustainBtn.classList.toggle('btn-primary', sustain);
+    });
+
+    octUpBtn.addEventListener('click', ()=>{ baseOctave++; renderKeys(); });
+    octDownBtn.addEventListener('click', ()=>{ baseOctave--; renderKeys(); });
+
+    function noteToFreq(noteIndex){
+      // noteIndex: semitones above C0. We'll compute frequency using A4 = 440
+      const A4 = 440;
+      const A4_INDEX = 57; // semitone index of A4 if C0=0 (A4 is 57)
+      const semitoneIndex = noteIndex; // using our mapping below
+      return A4 * Math.pow(2,(semitoneIndex - A4_INDEX)/12);
+    }
+
+    // Build visual keys
+    function renderKeys(){
+      keysContainer.innerHTML='';
+      // We'll create two groups: white keys and position black keys absolutely
+      // For simplicity we'll render a sequence where black keys overlap using negative margins
+      NOTES.forEach((n,i)=>{
+        const key = document.createElement('div');
+        key.classList.add('key');
+        if(n.black){ key.classList.add('black'); }
+        else { key.classList.add('white'); }
+        key.dataset.index = i;
+        key.innerHTML = `<div class="label">${n.name}<br><small>${n.key||''}</small></div>`;
+        key.addEventListener('pointerdown', onPointerDown);
+        key.addEventListener('pointerup', onPointerUp);
+        key.addEventListener('pointerleave', onPointerUp);
+        key.addEventListener('pointercancel', onPointerUp);
+        keysContainer.appendChild(key);
+      });
+    }
+
+    // Compute semitone index for each note based on baseOctave and NOTES layout
+    function getSemitoneForIndex(i){
+      // We'll consider NOTES[0] = C of baseOctave
+      // So semitone = C0 + (baseOctave*12) + i
+      const C0_INDEX = 0; // We'll treat C0 as 0
+      return baseOctave*12 + i;
+    }
+
+    // ADSR envelope + simple piano-like timbre using 2 oscillators
+    function playNote(i){
+      const semitone = getSemitoneForIndex(i);
+      const freq = noteToFreq(semitone);
+
+      const osc1 = ctx.createOscillator();
+      osc1.type = 'sine';
+      osc1.frequency.value = freq;
+
+      const osc2 = ctx.createOscillator();
+      osc2.type = 'triangle';
+      osc2.frequency.value = freq * 2.003; // slight inharmonicity for timbre
+
+      const gainNode = ctx.createGain();
+      gainNode.gain.value = 0.0001;
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 4800;
+
+      osc1.connect(gainNode);
+      osc2.connect(gainNode);
+      gainNode.connect(filter);
+      filter.connect(masterGain);
+
+      const now = ctx.currentTime;
+      // ADSR
+      const attack = 0.005;
+      const decay = 0.25;
+      const sustainLevel = 0.5;
+      const release = 0.6;
+
+      gainNode.gain.cancelScheduledValues(now);
+      gainNode.gain.setValueAtTime(0.0001, now);
+      gainNode.gain.linearRampToValueAtTime(1.0, now + attack);
+      gainNode.gain.exponentialRampToValueAtTime(Math.max(0.0001, sustainLevel), now + attack + decay);
+
+      osc1.start(now);
+      osc2.start(now);
+
+      const nodeObj = {osc1, osc2, gainNode, filter, started: now, release};
+      activeNodes.set(i, nodeObj);
+
+      // Visual
+      const keyEl = keysContainer.querySelector(`.key[data-index='${i}']`);
+      if(keyEl) keyEl.classList.add('playing');
+    }
+
+    function stopNote(i, immediate=false){
+      const node = activeNodes.get(i);
+      if(!node) return;
+      const now = ctx.currentTime;
+      if(sustain && !immediate){
+        // leave it until sustain disabled or explicit stop — we'll implement simple sustain by holding notes longer
+        // schedule release after a longer time
+        node.gainNode.gain.cancelScheduledValues(now);
+        node.gainNode.gain.setValueAtTime(node.gainNode.gain.value, now);
+        node.gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 2.0);
+        node.osc1.stop(now + 2.1);
+        node.osc2.stop(now + 2.1);
+      } else {
+        node.gainNode.gain.cancelScheduledValues(now);
+        node.gainNode.gain.setValueAtTime(node.gainNode.gain.value, now);
+        node.gainNode.gain.exponentialRampToValueAtTime(0.0001, now + node.release);
+        node.osc1.stop(now + node.release + 0.02);
+        node.osc2.stop(now + node.release + 0.02);
+      }
+      activeNodes.delete(i);
+      const keyEl = keysContainer.querySelector(`.key[data-index='${i}']`);
+      if(keyEl) keyEl.classList.remove('playing');
+    }
+
+    function onPointerDown(e){
+      e.preventDefault();
+      const idx = parseInt(this.dataset.index,10);
+      if(ctx.state === 'suspended') ctx.resume();
+      if(!activeNodes.has(idx)) playNote(idx);
+    }
+    function onPointerUp(e){
+      e.preventDefault();
+      const idx = parseInt(this.dataset.index,10);
+      if(activeNodes.has(idx)) stopNote(idx);
+    }
+    const keyPressed = new Set();
+    window.addEventListener('keydown', (e)=>{
+      if(e.repeat) return;
+      const k = e.key.toLowerCase();
+      if(k in keyMap){
+        const idx = keyMap[k];
+        if(!activeNodes.has(idx)){
+          if(ctx.state === 'suspended') ctx.resume();
+          playNote(idx);
+          keyPressed.add(k);
+        }
+      }
+    });
+    window.addEventListener('keyup', (e)=>{
+      const k = e.key.toLowerCase();
+      if(k in keyMap){
+        const idx = keyMap[k];
+        stopNote(idx);
+        keyPressed.delete(k);
+      }
+    });
+    renderKeys();
+    setInterval(()=>{
+      if(baseOctave<1) baseOctave=1;
+      if(baseOctave>6) baseOctave=6;
+    },500);
+
+    window.addEventListener('blur', ()=>{
+      for(const idx of Array.from(activeNodes.keys())) stopNote(idx,true);
+    });
+   setInterval(()=>{
+      if(!sustain){
+      }
+    },1000);
+
+  </script>
+  
+</body>
+</html>
